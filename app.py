@@ -128,14 +128,28 @@ if result:
     st.subheader(f"Final Report — Closure Date(s): {', '.join(result['target_dates'])}")
 
     if result["rows"]:
-        df = pd.DataFrame(result["rows"], columns=result["headers"])
+        # SELECTED_COLUMNS intentionally repeats "Company_name" (see pipeline.py),
+        # but pandas' Styler.apply/.map reject non-unique columns outright, so
+        # de-duplicate the labels for this on-screen preview only. The downloaded
+        # Excel report below is built separately from result["headers"]/["rows"]
+        # and keeps the real, intentionally-duplicated column layout.
+        seen = {}
+        display_headers = []
+        for h in result["headers"]:
+            seen[h] = seen.get(h, 0) + 1
+            display_headers.append(h if seen[h] == 1 else f"{h}.{seen[h] - 1}")
+        df = pd.DataFrame(result["rows"], columns=display_headers)
+
+        severity_idx = result["headers"].index("check_severity") if "check_severity" in result["headers"] else None
 
         def highlight_severity(row):
             color = ""
-            if row.get("check_severity") == "Red":
-                color = "background-color: #F8CBAD"
-            elif row.get("check_severity") == "Amber":
-                color = "background-color: #FFE699"
+            if severity_idx is not None:
+                value = row.iloc[severity_idx]
+                if value == "Red":
+                    color = "background-color: #F8CBAD"
+                elif value == "Amber":
+                    color = "background-color: #FFE699"
             return [color] * len(row)
 
         st.dataframe(
