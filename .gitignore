@@ -1,4 +1,22 @@
+# Secrets
 .env
-downloads/
+.env.*
+
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+.venv/
+venv/
+
+# Generated reports / downloads
+downloads/
+*.xlsx
+
+# Streamlit
+.streamlit/secrets.toml
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,169 +1,61 @@
-"""
-Streamlit UI for the DXC Vietnam Non-Green Tracker pipeline:
+"""Streamlit UI for the DXC Vietnam Non Green Checks report. Run: streamlit run app.py"""
 
-Login -> Pull MIS query -> Filter severity -> Select/rename columns ->
-Filter by closure date (dynamic: yesterday, or Fri/Sat/Sun if today is
-Monday) -> Polished Excel report.
+from datetime import date, timedelta
 
-Run with:
-    streamlit run app.py
-"""
-
-import os
-from datetime import datetime, timedelta
-
-import pandas as pd
-import requests
 import streamlit as st
-from dotenv import load_dotenv
 
-import pipeline as p
+import report as r
 
-load_dotenv()
-MIS_USERNAME = os.environ.get("MIS_USERNAME")
-MIS_PASSWORD = os.environ.get("MIS_PASSWORD")
+st.set_page_config(page_title="DXC Vietnam - Non Green Checks", page_icon="📋", layout="wide")
+st.title("DXC Vietnam - Non Green Checks")
 
-st.set_page_config(page_title="DXC Vietnam Non-Green Tracker", page_icon="📋", layout="wide")
+# Default closure dates: yesterday, or Fri-Sun when today is Monday.
+default_start, default_end = r.get_closure_window(date.today())
+default_last_day = default_end - timedelta(days=1)
 
-st.title("📋 DXC Vietnam - Non Green Checks Tracker")
-st.caption("Authbridge MIS Query Browser → filtered, formatted Final Report")
+picked = st.date_input(
+    "Check closure date(s)",
+    value=(default_start, default_last_day),
+    max_value=date.today(),
+    help="Defaults to yesterday, or Friday-Sunday when today is Monday.",
+)
+# date_input returns a 1-tuple while the user is still choosing the end date.
+if isinstance(picked, (tuple, list)):
+    start = picked[0] if picked else default_start
+    last_day = picked[1] if len(picked) > 1 else start
+else:
+    start = last_day = picked
 
-if "result" not in st.session_state:
-    st.session_state.result = None
+if st.button("Generate report", type="primary"):
+    with st.spinner("Fetching data from the database..."):
+        try:
+            rows, flex_map = r.fetch_data(start, last_day + timedelta(days=1))
+            headers, final_rows, missing = r.build_final_rows(rows, flex_map)
+            wb, window = r.build_workbook(headers, final_rows, start, last_day + timedelta(days=1))
+            st.session_state.result = {
+                "headers": headers,
+                "rows": final_rows,
+                "missing": missing,
+                "window": window,
+                "xlsx": r.workbook_bytes(wb),
+                "filename": f"DXC_Vietnam_Non_Green_Checks_{start:%Y%m%d}_{last_day:%Y%m%d}.xlsx",
+            }
+        except Exception as e:  # surface DB errors in the UI
+            st.session_state.pop("result", None)
+            st.error(f"Failed to generate report: {e}")
 
-if not MIS_USERNAME or not MIS_PASSWORD:
-    st.error("MIS_USERNAME / MIS_PASSWORD not found. Add them to a .env file in the project folder.")
-    st.stop()
-
-with st.sidebar:
-    st.header("⚙️ Query Settings")
-    query_key = st.selectbox(
-        "Saved query",
-        options=list(p.QUERIES.keys()),
-        format_func=lambda k: f"{k} — {p.QUERIES[k]['label']}",
-        index=list(p.QUERIES.keys()).index("tracker"),
-    )
-    client_name = st.text_input("Client Name", value="DXC V")
-
-    st.header("📅 Data Pull Range")
-    range_mode = st.radio("Range mode", ["Last N months", "Custom range"], horizontal=True)
-    today = datetime.now()
-    if range_mode == "Last N months":
-        months = st.number_input("Months back", min_value=1, max_value=84, value=3)
-        from_date = today - timedelta(days=30 * months)
-        to_date = today
-        st.caption(f"From **{from_date.date()}** to **{to_date.date()}**")
-    else:
-        from_date = st.date_input("From date", value=today - timedelta(days=90))
-        to_date = st.date_input("To date", value=today.date())
-        from_date = datetime.combine(from_date, datetime.min.time())
-        to_date = datetime.combine(to_date, datetime.max.time())
-
-    st.header("🎯 Severity Filter")
-    severities = st.multiselect(
-        "Keep only these severities",
-        options=["Red", "Amber", "Green", "Green_Approved", "Clear"],
-        default=["Amber", "Red"],
-    )
-
-    st.header("🗓️ Closure Date Filter")
-    auto_dates = p.get_target_dates()
-    use_auto = st.checkbox(
-        f"Auto (dynamic): {sorted(auto_dates)}",
-        value=True,
-        help="Yesterday's date, or Friday/Saturday/Sunday if today is Monday.",
-    )
-    if not use_auto:
-        manual_dates = st.date_input(
-            "Manual closure date(s)",
-            value=[datetime.now().date() - timedelta(days=1)],
-        )
-        if not isinstance(manual_dates, (list, tuple)):
-            manual_dates = [manual_dates]
-        target_dates = {d.strftime("%Y-%m-%d") for d in manual_dates}
-    else:
-        target_dates = auto_dates
-
-    run = st.button("🚀 Run Pipeline", type="primary", use_container_width=True)
-
-if run:
-    try:
-        with st.spinner("Logging in to MIS..."):
-            session = requests.Session()
-            p.login(session, MIS_USERNAME, MIS_PASSWORD)
-
-        with st.spinner(f"Pulling '{query_key}' data from {from_date.date()} to {to_date.date()} "
-                         f"for client '{client_name}'... (can take a while for wide ranges)"):
-            zip_bytes = p.fetch_report_zip(session, query_key, from_date, to_date, client_name)
-            headers, raw_rows = p.extract_csv_rows(zip_bytes)
-
-        st.success(f"Pulled {len(raw_rows)} total rows.")
-
-        severity_rows = p.filter_severity(raw_rows, severities)
-        st.info(f"After severity filter ({', '.join(severities) or 'none'}): {len(severity_rows)} rows.")
-
-        sel_headers, sel_rows = p.select_and_rename(severity_rows)
-
-        final_rows = p.filter_by_closure_date(sel_headers, sel_rows, target_dates)
-        st.info(f"After closure-date filter ({', '.join(sorted(target_dates))}): {len(final_rows)} rows.")
-
-        wb = p.build_report_workbook(sel_headers, final_rows, target_dates,
-                                      severity_label=", ".join(severities) or "None")
-        xlsx_bytes = p.workbook_to_bytes(wb)
-
-        st.session_state.result = {
-            "headers": sel_headers,
-            "rows": final_rows,
-            "xlsx_bytes": xlsx_bytes,
-            "target_dates": sorted(target_dates),
-        }
-    except p.PipelineError as exc:
-        st.error(str(exc))
-    except Exception as exc:
-        st.error(f"Something went wrong: {exc}")
-
-result = st.session_state.result
-if result:
-    st.divider()
-    st.subheader(f"Final Report — Closure Date(s): {', '.join(result['target_dates'])}")
-
-    if result["rows"]:
-        # SELECTED_COLUMNS intentionally repeats "Company_name" (see pipeline.py),
-        # but pandas' Styler.apply/.map reject non-unique columns outright, so
-        # de-duplicate the labels for this on-screen preview only. The downloaded
-        # Excel report below is built separately from result["headers"]/["rows"]
-        # and keeps the real, intentionally-duplicated column layout.
-        seen = {}
-        display_headers = []
-        for h in result["headers"]:
-            seen[h] = seen.get(h, 0) + 1
-            display_headers.append(h if seen[h] == 1 else f"{h}.{seen[h] - 1}")
-        df = pd.DataFrame(result["rows"], columns=display_headers)
-
-        severity_idx = result["headers"].index("check_severity") if "check_severity" in result["headers"] else None
-
-        def highlight_severity(row):
-            color = ""
-            if severity_idx is not None:
-                value = row.iloc[severity_idx]
-                if value == "Red":
-                    color = "background-color: #F8CBAD"
-                elif value == "Amber":
-                    color = "background-color: #FFE699"
-            return [color] * len(row)
-
-        st.dataframe(
-            df.style.apply(highlight_severity, axis=1),
-            use_container_width=True,
-            height=min(600, 45 + 35 * len(df)),
-        )
-    else:
-        st.warning("No records found for the selected date(s). The report contains headers only.")
-
+res = st.session_state.get("result")
+if res:
+    if res["missing"]:
+        st.warning(f"Not found in the client field mapping (left blank): {', '.join(res['missing'])}")
+    st.success(f"Closure date: {res['window']} - {len(res['rows'])} record(s)")
     st.download_button(
-        "⬇️ Download Final Report (Excel)",
-        data=result["xlsx_bytes"],
-        file_name="DXC Vietnam - Final Report.xlsx",
+        "Download Excel report",
+        data=res["xlsx"],
+        file_name=res["filename"],
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
     )
+    if res["rows"]:
+        st.dataframe([dict(zip(res["headers"], row)) for row in res["rows"]], width="stretch")
+    else:
+        st.info("No non-green checks found for the selected date(s). The downloaded file will be blank.")
